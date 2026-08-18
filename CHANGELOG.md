@@ -6,6 +6,17 @@ All notable changes to VERNAM are recorded here. Versions are two-part
 The `.vrn` file format has its own version byte (currently `1`) inside each file,
 independent of the tool version below; old files always keep opening.
 
+## 1.2 (2026-08-17)
+
+Adds a command-line tool. No format change, every existing .vrn file keeps opening.
+
+- New `cli/vernam.js`: encrypt and decrypt from a terminal, with no file size limit. Everything streams through a 1 MiB buffer, so memory use is flat no matter how big the file is. This is the answer for files above 2 GiB in Firefox and Safari, where the browser falls back to an in-memory download.
+- Zero dependencies: the CLI runs on plain Node 18+ and reuses the libsodium build already vendored for the web page, so files move freely between the CLI and the browser tool.
+- Auto-detects encrypt vs decrypt, same as the web page. Also `vernam gen` (passphrase generator) and `vernam info` (header inspection).
+- Passphrases are read from a hidden prompt, `--passphrase-file`, or `VERNAM_PASSPHRASE`. There is deliberately no `--passphrase` flag: command lines are visible to other processes.
+- Output is written to a temp file and renamed only on success, so a failed or interrupted run never leaves a partial file behind. Outputs are created with 0600 permissions, and an existing file is never overwritten without `--force`.
+- Refuses anything that is not a regular file (a pipe, socket, or device) instead of silently writing an empty encrypted file or blocking forever, since the input is read by position.
+
 ## 1.1 (2026-06-18)
 
 Security hardening. No format change, every existing .vrn file keeps opening.

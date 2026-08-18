@@ -28,6 +28,7 @@ These files are hand-maintained in this repo and are fair game for issues and pu
 
 - `LICENSE` and `THIRD-PARTY-LICENSES.txt` (only for genuine licensing corrections)
 - `FORMAT.md` (the `.vrn` file format spec)
+- `cli/vernam.js` (the command line tool; it is maintained here, not upstream)
 - `README.md` and this `CONTRIBUTING.md`
 - the page shell of `index.html` outside the synced regions (head, meta, theme toggle, footer),
   `_headers`, `robots.txt`, `site.webmanifest`, and the favicon and icon assets
@@ -43,6 +44,10 @@ Two things are meant to stay stable so other people can build on VERNAM:
 
 If you find a bug in either, please report it. Format and API changes are handled carefully because
 they affect every existing encrypted file.
+
+The CLI is held to the same contract: it must read and write exactly what the browser engine does. If
+you change `cli/vernam.js`, check a roundtrip in both directions (encrypt in the browser, decrypt on
+the command line, and the reverse) before opening a pull request.
 
 ## Reporting issues
 
