@@ -202,6 +202,33 @@ async function writeAll(fd, chunk) {
   }
 }
 
+// Everything that can make a destination unusable, checked in one place: a
+// missing or unwritable directory, and a name the filesystem will not accept.
+// Called early during encryption, before the key derivation, so a typo costs
+// nothing, and again inside makeSink so every other path reports it the same
+// way instead of surfacing a raw errno from open() or rename().
+function checkDestination(finalPath) {
+  const dir = path.dirname(finalPath);
+  const base = path.basename(finalPath);
+  let st;
+  try {
+    st = fs.statSync(dir);
+  } catch (e) {
+    throw new UserError('There is no directory ' + dir + ' to write ' + base + ' into.');
+  }
+  if (!st.isDirectory()) throw new UserError(dir + ' is not a directory, so nothing can be written into it.');
+  try {
+    fs.accessSync(dir, fs.constants.W_OK);
+  } catch (e) {
+    throw new UserError('No permission to write into ' + dir + '.');
+  }
+  const bytes = Buffer.byteLength(base);
+  if (bytes > NAME_MAX) {
+    throw new UserError('The output would be named ' + base.slice(0, 30) + '... (' + bytes +
+      ' bytes), longer than the ' + NAME_MAX + ' this filesystem allows. Pass -o with a shorter name.');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Output sink: write to a temp file beside the destination, rename on success.
 // VERNAM never leaves a partial output behind.
@@ -217,6 +244,7 @@ function cleanupTempsSync() {
 }
 
 async function makeSink(finalPath, force) {
+  checkDestination(finalPath);
   if (!force && fs.existsSync(finalPath)) {
     throw new UserError(finalPath + ' already exists. Pass --force to overwrite it.');
   }
@@ -300,8 +328,9 @@ async function encryptFile(inPath, passphrase, opts) {
     ? (isDir(opts.out) ? path.join(opts.out, name + EXT) : opts.out)
     : inPath + EXT;
 
-  // Check this before Argon2id rather than after: nobody wants to wait out a
-  // key derivation only to be told the output was already there.
+  // Check all of this before Argon2id rather than after: nobody wants to wait
+  // out a key derivation only to be told where the output could not go.
+  checkDestination(outPath);
   if (!opts.force && fs.existsSync(outPath)) {
     throw new UserError(outPath + ' already exists. Pass --force to overwrite it.');
   }
@@ -570,9 +599,18 @@ function firstLine(text) {
 
 async function getPassphrase(opts, mode) {
   if (opts.passphraseFile != null) {
-    const text = opts.passphraseFile === '-'
-      ? await readStdinAll()
-      : await fsp.readFile(opts.passphraseFile, 'utf8');
+    let text;
+    if (opts.passphraseFile === '-') {
+      text = await readStdinAll();
+    } else {
+      try {
+        text = await fsp.readFile(opts.passphraseFile, 'utf8');
+      } catch (e) {
+        const why = { ENOENT: 'no such file', EISDIR: 'it is a directory', EACCES: 'permission denied' }[e.code] ||
+          e.code || e.message;
+        throw new UserError('Could not read the passphrase file ' + opts.passphraseFile + ': ' + why + '.');
+      }
+    }
     return firstLine(text);
   }
   if (process.env.VERNAM_PASSPHRASE) return process.env.VERNAM_PASSPHRASE;
@@ -733,6 +771,17 @@ https://www.privacytools.io/encrypt -- files move freely between the two.
 Made by PrivacyTools.io -- https://www.privacytools.io
 `;
 
+// parseInt would quietly salvage a number from anything ("1e3" -> 1, "12abc" ->
+// 12), which for --words means silently generating a weaker passphrase than the
+// one asked for. Demand a whole number instead.
+function intArg(value, flag) {
+  const n = Number(String(value).trim());
+  if (!Number.isInteger(n)) {
+    throw new UserError(flag + ' needs a whole number, but got "' + value + '".');
+  }
+  return n;
+}
+
 function parseArgs(argv) {
   const opts = { _: [], profile: 'standard', force: false, quiet: false, out: null, passphraseFile: null, words: 6 };
   for (let i = 0; i < argv.length; i++) {
@@ -749,7 +798,7 @@ function parseArgs(argv) {
       case '-f': case '--force': opts.force = true; break;
       case '--passphrase-file': opts.passphraseFile = need(a); break;
       case '-q': case '--quiet': opts.quiet = true; break;
-      case '--words': opts.words = parseInt(need(a), 10); break;
+      case '--words': opts.words = intArg(need(a), a); break;
       case '-h': case '--help': opts._.unshift('help'); break;
       case '-v': case '--version': opts._.unshift('version'); break;
       default:
@@ -769,7 +818,7 @@ async function main(argv) {
 
   if (cmd === 'gen') {
     const n = opts.words;
-    if (!Number.isInteger(n) || n < 1 || n > 64) throw new UserError('--words must be between 1 and 64.');
+    if (n < 1 || n > 64) throw new UserError('--words must be between 1 and 64, but got ' + n + '.');
     const p = generatePassphrase(n);
     process.stdout.write(p + '\n');
     if (process.stderr.isTTY) {
