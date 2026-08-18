@@ -50,8 +50,13 @@ const MAX_MEMLIMIT = 1024 * 1024 * 1024; // 1 GiB (our highest profile)
 
 // Same reasoning for the length prefix of each body message: it is plaintext,
 // so a corrupt or hostile file can claim any size. We only ever write
-// CHUNK + ABYTES; accept a bit more for other implementations, then refuse.
-const MAX_CT = 16 * 1024 * 1024;
+// CHUNK + ABYTES; accept far more than that so a conforming file written with a
+// larger chunk size still opens, but stay bounded so a hostile length prefix
+// cannot make us allocate wildly.
+const MAX_CT = 64 * 1024 * 1024;
+
+// Longest single filename component most filesystems allow (APFS, ext4, NTFS).
+const NAME_MAX = 255;
 
 // Output files are created 0600. Decrypted plaintext should not be
 // world-readable by default; chmod afterwards if you want it shared.
@@ -159,6 +164,17 @@ function sanitizeName(name) {
   return n || 'decrypted';
 }
 
+// Trim a filename to at most `max` bytes without splitting a UTF-8 character.
+function fitBytes(name, max) {
+  if (Buffer.byteLength(name) <= max) return name;
+  let out = '';
+  for (const ch of name) {
+    if (Buffer.byteLength(out + ch) > max) break;
+    out += ch;
+  }
+  return out || 'out';
+}
+
 function fmtBytes(n) {
   if (n == null) return '?';
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
@@ -205,12 +221,18 @@ async function makeSink(finalPath, force) {
     throw new UserError(finalPath + ' already exists. Pass --force to overwrite it.');
   }
   const dir = path.dirname(finalPath);
-  const tmp = path.join(dir, '.' + path.basename(finalPath) + '.' + nodeCrypto.randomBytes(6).toString('hex') + '.part');
+  // The temp name is the output name plus a leading dot and a random suffix.
+  // That can push a long-but-legal filename past NAME_MAX, so trim the middle
+  // part to fit: the random suffix is what makes the name unique, not the base.
+  const suffix = '.' + nodeCrypto.randomBytes(6).toString('hex') + '.part';
+  const tmp = path.join(dir, '.' + fitBytes(path.basename(finalPath), NAME_MAX - 1 - suffix.length) + suffix);
   const fd = await fsp.open(tmp, 'wx', OUT_MODE);
   pendingTemps.add(tmp);
   let bytes = 0;
   return {
     path: finalPath,
+    // What has been written so far, before the rename makes it final.
+    written() { return bytes; },
     async write(chunk) {
       await writeAll(fd, chunk);
       bytes += chunk.length;
@@ -268,6 +290,10 @@ async function encryptFile(inPath, passphrase, opts) {
   const prof = PROFILES[opts.profile === 'high' ? 'high' : 'standard'];
   const stat = await fsp.stat(inPath);
   if (stat.isDirectory()) throw new UserError(inPath + ' is a directory. Make an archive of it first (tar, zip).');
+  if (!stat.isFile()) {
+    throw new UserError(inPath + ' is not a regular file. VERNAM reads its input by ' +
+      'position, so it needs a real file rather than a pipe, socket, or device.');
+  }
   const size = stat.size;
   const name = path.basename(inPath);
   const outPath = opts.out
@@ -376,6 +402,10 @@ async function decryptFile(inPath, passphrase, opts) {
   const s = await ready();
   const stat = await fsp.stat(inPath);
   if (stat.isDirectory()) throw new UserError(inPath + ' is a directory.');
+  if (!stat.isFile()) {
+    throw new UserError(inPath + ' is not a regular file. VERNAM reads its input by ' +
+      'position, so it needs a real file rather than a pipe, socket, or device.');
+  }
   const size = stat.size;
   if (size < HEADER_LEN) throw new UserError('This is not a PrivacyTools.io encrypted file.');
 
@@ -408,8 +438,15 @@ async function decryptFile(inPath, passphrase, opts) {
       if (await readFull(fd, lenBuf, 4, pos) < 4) throw new UserError('The file is truncated or corrupted.');
       const len = lenBuf.readUInt32LE(0);
       pos += 4;
-      if (len < s.crypto_secretstream_xchacha20poly1305_ABYTES || len > MAX_CT) {
+      if (len < s.crypto_secretstream_xchacha20poly1305_ABYTES) {
         throw new UserError('The file is truncated or corrupted.');
+      }
+      if (len > MAX_CT) {
+        // Not corruption: a conforming file written with a chunk size larger
+        // than we are willing to buffer. Say so, rather than sending someone
+        // hunting for damage that isn't there.
+        throw new UserError('This file uses a chunk size this build does not support (' +
+          fmtBytes(len) + ' in one message, limit ' + fmtBytes(MAX_CT) + ').');
       }
       const ct = Buffer.allocUnsafe(len);
       if (await readFull(fd, ct, len, pos) < len) throw new UserError('The file is truncated or corrupted.');
@@ -447,12 +484,15 @@ async function decryptFile(inPath, passphrase, opts) {
     if (!done) throw new UserError('The file is truncated or corrupted.');
     prog.done(pos);
 
-    const written = await sink.close();
-    if (meta && typeof meta.s === 'number' && meta.s !== written) {
+    // Check this BEFORE close(), because close() renames the temp file into
+    // place. Throwing here reaches the catch below, which aborts the sink and
+    // removes the temp file, so the claim in the message stays true.
+    if (meta && typeof meta.s === 'number' && meta.s !== sink.written()) {
       // Every chunk was authenticated, so this should be unreachable; if it
       // ever fires, something is wrong and the output should not be trusted.
       throw new UserError('Decrypted size does not match the recorded size. The output was discarded.');
     }
+    const written = await sink.close();
     return { name: outName, path: outPath, size: written };
   } catch (e) {
     if (sink) await sink.abort();
@@ -611,6 +651,10 @@ function strengthLabel(bits) {
 async function infoFile(inPath) {
   const s = await ready();
   const stat = await fsp.stat(inPath);
+  if (!stat.isFile()) {
+    throw new UserError(inPath + ' is not a regular file. VERNAM reads its input by ' +
+      'position, so it needs a real file rather than a pipe, socket, or device.');
+  }
   if (stat.size < HEADER_LEN) throw new UserError('This is not a PrivacyTools.io encrypted file.');
   const fd = await fsp.open(inPath, 'r');
   try {
@@ -748,7 +792,22 @@ async function main(argv) {
   if (opts._.length > (cmd === 'auto' ? 1 : 2)) {
     throw new UserError('Only one file at a time. Run `vernam help` for usage.');
   }
-  if (!fs.existsSync(target)) throw new UserError('No such file: ' + target);
+  let st;
+  try {
+    st = fs.statSync(target);
+  } catch (e) {
+    throw new UserError('No such file: ' + target);
+  }
+  if (st.isDirectory()) {
+    throw new UserError(target + ' is a directory. Make an archive of it first (tar, zip).');
+  }
+  // Refuse anything that is not a regular file up front. The direction sniff
+  // below opens the file, and opening a FIFO blocks until a writer shows up,
+  // so leaving this to encryptFile/decryptFile would hang instead of erroring.
+  if (!st.isFile()) {
+    throw new UserError(target + ' is not a regular file. VERNAM reads its input by ' +
+      'position, so it needs a real file rather than a pipe, socket, or device.');
+  }
 
   if (cmd === 'info') { await infoFile(target); return 0; }
 

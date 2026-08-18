@@ -15,6 +15,7 @@ Adds a command-line tool. No format change, every existing .vrn file keeps openi
 - Auto-detects encrypt vs decrypt, same as the web page. Also `vernam gen` (passphrase generator) and `vernam info` (header inspection).
 - Passphrases are read from a hidden prompt, `--passphrase-file`, or `VERNAM_PASSPHRASE`. There is deliberately no `--passphrase` flag: command lines are visible to other processes.
 - Output is written to a temp file and renamed only on success, so a failed or interrupted run never leaves a partial file behind. Outputs are created with 0600 permissions, and an existing file is never overwritten without `--force`.
+- Refuses anything that is not a regular file (a pipe, socket, or device) instead of silently writing an empty encrypted file or blocking forever, since the input is read by position.
 
 ## 1.1 (2026-06-18)
 
