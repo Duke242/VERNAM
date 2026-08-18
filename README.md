@@ -79,6 +79,74 @@ Pages, Netlify, Cloudflare Pages). No backend, no config. That is exactly how
 
 Streaming-to-disk for large files uses the File System Access API (Chromium-based
 browsers). Firefox and Safari fall back to an in-memory download, capped at 2 GiB.
+For anything bigger there, use the [command line tool](#the-command-line-tool),
+which has no size limit at all.
+
+## The command line tool
+
+`cli/vernam.js` is the same encryptor without a browser: same format, same
+primitives, no size limit. It streams everything through a 1 MiB buffer, so a
+500 GiB file uses the same memory as a 5 KiB one. Reach for it when the browser
+cannot (Firefox and Safari cap the in-memory download at 2 GiB), or when you
+want encryption inside a script, a cron job, or over SSH.
+
+It needs **Node 18 or newer and nothing else**. There is no `npm install`: it
+reuses the libsodium build already vendored for the web page, so a file
+encrypted on the command line opens in the browser tool and the other way round.
+
+```sh
+git clone https://github.com/LifetimeLabsDev/VERNAM.git
+cd VERNAM
+node cli/vernam.js help
+
+# put it on your PATH, if you like
+ln -s "$PWD/cli/vernam.js" /usr/local/bin/vernam
+```
+
+**Everyday use.** Direction is auto-detected from the file, exactly like the web
+page: drop in anything and it encrypts, drop in a `.vrn` and it decrypts.
+
+```sh
+vernam backup.tar          # -> backup.tar.vrn, asks for a passphrase (twice)
+vernam backup.tar.vrn      # -> backup.tar, asks once
+vernam gen                 # a strong passphrase, 6 words from BIP-0039
+vernam info backup.tar.vrn # what's in the header, without decrypting
+```
+
+| Option | What it does |
+|--------|--------------|
+| `-o, --out <path>` | Write somewhere else. A directory is fine; the name comes from inside the file. |
+| `--high` | High-security KDF profile (1 GiB Argon2id instead of 256 MiB). |
+| `-f, --force` | Overwrite the output if it already exists. Off by default. |
+| `--passphrase-file <p>` | Read the passphrase from a file, or `-` for stdin. |
+| `-q, --quiet` | No progress output. |
+| `--words N` | Word count for `vernam gen` (default 6). |
+
+**Passphrases.** On a terminal, VERNAM asks (twice, when encrypting) and never
+echoes what you type. Without a terminal it reads `--passphrase-file` or the
+`VERNAM_PASSPHRASE` environment variable. There is deliberately no
+`--passphrase` flag: command lines are visible to every other process on the
+machine.
+
+```sh
+# unattended, in a script
+VERNAM_PASSPHRASE="$(cat /run/secrets/backup-key)" vernam -q nightly.tar
+vernam --passphrase-file /run/secrets/backup-key nightly.tar.vrn
+```
+
+**Safety.** The output goes to a temp file and is renamed only after the last
+chunk authenticates, so a wrong passphrase, a corrupt file, or a Ctrl+C never
+leaves a partial file behind. Outputs are created `0600`. Your input file is
+never touched or deleted.
+
+```
+$ vernam huge.img
+Passphrase:
+Repeat passphrase:
+Deriving key (Argon2id, standard profile)...
+Encrypting  63%  1.87 GiB / 2.97 GiB  268 MiB/s
+Encrypted -> huge.img.vrn (2.97 GiB)
+```
 
 ## The one condition: link back to PrivacyTools.io
 
@@ -120,6 +188,7 @@ hand:
 | `assets/css/card.css` | Styles for the tool card. |
 | `assets/js/vernam-ui.js` | Wiring for the tool card (drives the engine). |
 | `assets/js/vernam.js` | The crypto engine. Exposes `window.Vernam`. |
+| `cli/vernam.js` | The [command line tool](#the-command-line-tool). Node 18+, no dependencies. |
 | `assets/js/wordlist.js` | BIP-0039 English wordlist for the passphrase generator. |
 | `assets/vendor/sodium.js` | Vendored libsodium (ISC). No CDN, works offline. |
 | `FORMAT.md` | The `.vrn` file format spec. |
